@@ -181,6 +181,43 @@ loss_analysis_iqr <- raw_data_prepped %>%
   arrange(desc(Percent_Lost))
 
 print(loss_analysis_iqr, n = 40)
+
+
+# ==========================================
+# CALCUALTE CLEANING LOSS %
+# ==========================================
+
+# 1. Get Initial Counts after labeling (pre-IQR/Outlier removal)
+initial_counts <- raw_data_prepped %>%
+  count(Is_Swiftshader, name = "initial_n")
+
+# 2. Get Final Counts after all cleaning steps
+final_counts <- final_dataset_CLEANED_iqr %>%
+  count(Is_Swiftshader, name = "final_n")
+
+# 3. Join and Calculate Loss Percentages
+cleaning_summary <- initial_counts %>%
+  left_join(final_counts, by = "Is_Swiftshader") %>%
+  mutate(
+    trials_lost = initial_n - final_n,
+    percent_removed = round((trials_lost / initial_n) * 100, 2)
+  )
+
+# 4. Calculate Overall Total Loss (non-grouped)
+overall_loss <- cleaning_summary %>%
+  summarise(
+    total_initial = sum(initial_n),
+    total_final = sum(final_n),
+    total_lost = total_initial - total_final,
+    total_percent_removed = round((total_lost / total_initial) * 100, 2)
+  )
+
+# Display results
+print("Grouped Loss Statistics:")
+print(cleaning_summary)
+
+print("Overall Dataset Loss:")
+print(overall_loss)
 # ==========================================
 # 8. EXPORT CLEANED DATA
 # ==========================================
