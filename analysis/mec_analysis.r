@@ -1,5 +1,5 @@
 # ==============================================================================
-# MEC STUDY: INFERENTIAL ANALYSIS SCRIPT
+# MEC STUDY: ANALYSIS SCRIPT
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -57,7 +57,7 @@ print("================ LMER ANALYSES ================")
 # A. Main Effects Model
 # Predict log(RT) based on Device and GameType, accounting for random intercepts by participant
 print("--- LMER: Main Effects (Device + GameType) ---")
-base_model <- lmer(log(RT) ~ Is_Swiftshader + GameType + (1 | pid), data = analysis_data)
+base_model <- lmer(log(RT) ~ Is_Swiftshader + GameType + (1 | pid), data = mec_data)
 print(summary(base_model))
 
 # Calculate confidence intervals for the main effect of Swiftshader
@@ -68,9 +68,45 @@ print(confint(base_model, parm = "Is_Swiftshaderswiftshader", method = "Wald"))
 # B. Interaction Model
 # Predict log(RT) to see if the Swiftshader penalty changes depending on the GameType
 print("--- LMER: Interaction (Device * GameType) ---")
-interaction_model <- lmer(log(RT) ~ Is_Swiftshader * GameType + (1 | pid), data = analysis_data)
+interaction_model <- lmer(log(RT) ~ Is_Swiftshader * GameType + (1 | pid), data = mec_data)
 print(summary(interaction_model))
+confint(interaction_model)
 
+# C. Model with FPS CV as a predictor
+# calculate the the CV for FPS for each row
+mec_data1 <- mec_data %>%
+  mutate(
+    FPS_sd = sqrt(FPS_var),                    
+    FPS_CV = (FPS_sd / FPS_mean) * 100         # Calculate CV as a percentage
+  )
+
+# Linear Mixed-Effects Model (unscaled, less interpretable)
+cv_model_unscaled <- lmer(log(RT) ~ Is_Swiftshader + FPS_CV + (1 | pid), data = mec_data1)
+summary(cv_model_unscaled)
+
+# Standardizing FPS_CV
+mec_data1$FPS_CV_scaled <- scale(mec_data1$FPS_CV)
+
+
+# Keep only rows where both FPS_CV and log(RT) are present
+df_clean <- mec_data1[!is.na(mec_data1$FPS_CV) & !is.na(mec_data1$RT), ]
+
+# Models for checking comparing model fits (For ANOVA)
+# Base model
+m0 <- lmer(log(RT) ~ Is_Swiftshader * GameType + (1 | pid), data = df_clean, REML = FALSE)
+
+# Add fixed effect only
+m1 <- lmer(log(RT) ~ Is_Swiftshader * GameType + FPS_CV_scaled + (1 | pid), data = df_clean, REML = FALSE)
+
+# Add random slope
+m2 <- lmer(log(RT) ~ Is_Swiftshader * GameType + FPS_CV_scaled + (1 + FPS_CV_scaled | pid), data = df_clean, REML = FALSE)
+
+anova(m0, m1)
+anova(m1, m2)
+
+# Final model
+final_model <- lmer(log(RT) ~ Is_Swiftshader * GameType + FPS_CV_scaled + (1 + FPS_CV_scaled | pid), data = df_clean)
+summary(final_model)
 
 # ------------------------------------------------------------------------------
 # 5. ESTIMATED MARGINAL MEANS (EMMEANS)
