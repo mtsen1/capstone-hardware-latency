@@ -1,5 +1,5 @@
 # ==============================================================================
-# PROLIFIC STUDY: INFERENTIAL ANALYSIS SCRIPT
+# PROLIFIC STUDY: ANALYSIS SCRIPT
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -11,6 +11,10 @@ library(lmerTest)     # Adds p-values to lme4 output
 library(mediation)    # For causal mediation analysis
 library(emmeans)      # For estimated marginal means and post-hoc tests
 library(performance)  # For checking model assumptions
+library(car)
+library(tibble)
+library(purrr)
+library(knitr)
 
 # ------------------------------------------------------------------------------
 # 2. LOAD & PREP DATA
@@ -58,10 +62,15 @@ print(t_test_paired)
 print("================ BASE LMER ================")
 
 # Predict log(RT) based on Device Spec, accounting for random intercepts by participant
-base_model <- lmer(log(RT) ~ Device_Spec + (1 | pid), data = analysis_data)
+base_model <- lmer(log(RT) ~ Device_Spec + (1 | pid), data = prolific_dat)
 
 print(summary(base_model))
 print(confint(base_model, parm = "Device_SpecCPU", method = "Wald"))
+
+# r^2 value
+r2(base_model)
+
+Anova(base_model, type = "III")
 
 # --- Estimated Marginal Means & Post-Hoc ---
 print("--- LMER-Adjusted Group Means (ms) ---")
@@ -74,35 +83,267 @@ print("--- Post-Hoc Pairwise Comparison ---")
 base_post_hoc <- pairs(base_emmeans)
 print(base_post_hoc)
 
+# model assumptions
+r2(base_model)
+check_model(base_model)
+
+prolific_dat$CV_scaled <- scale(prolific_dat$CV)
+
+# Does Device type affect FPS CV
+fps_model <- lmer(CV ~ Device_Spec + (1 | pid), data = prolific_dat)
+summary(fps_model)
+
+# Models for checking comparing model fits (For ANOVA)
+# base model
+m0 <- lmer(log(RT) ~ Device_Spec + (1 | pid), data = prolific_dat, REML = FALSE)
+
+# model with FPS CV as a fixed effect
+m1 <- lmer(log(RT) ~ Device_Spec + CV_scaled + (1 | pid),
+           data = prolific_dat, REML = FALSE)
+
+# model with FPS CV as a random effect
+m2 <- lmer(log(RT) ~ Device_Spec + CV_scaled + (1 + CV_scaled | pid),
+           data = prolific_dat, REML = FALSE)
+
+anova(m0, m1)
+anova(m1, m2)
+
+
+# Final model
+final_model <- lmer(log(RT) ~ Device_Spec + CV_scaled + (1 + CV_scaled | pid), data = prolific_dat)
+summary(final_model)
+r2(final_model)
+check_model(final_model)
+confint(final_model)
+
+
+# checking how much the render effect is explained by jitter
+beta0 <- fixef(base_model)["Device_SpecCPU"]
+beta1 <- fixef(final_model)["Device_SpecCPU"]
+
+percent_reduction <- (beta0 - beta1) / beta0 * 100
+percent_reduction
+
+
 # ------------------------------------------------------------------------------
 # 5. MEDIATION ANALYSIS: Does Jitter (CV) explain the CPU penalty?
 # ------------------------------------------------------------------------------
-print("================ MEDIATION (CV) ================")
+# ---- EDITED MEDIATION
+# -------------------------------------------------------------------------
+# Cluster bootstrap mediation-style pipeline for Swiftshader -> CV -> log(RT)
+# Updated to align with the mixed-effects models:
+#   Mediator:  CV_scaled ~ Device_Spec + (1 | pid)
+#   Outcome:   log(RT) ~ Device_Spec + CV_scaled + (1 + CV_scaled | pid)
+# -------------------------------------------------------------------------
+set.seed(123)
 
-# Model M: Predict the Mediator (CV) from the Treatment (Device_Spec) [cite: 64]
-med_fit <- lmer(CV ~ Device_Spec + (1 | pid), data = analysis_data)
+# ----------------------------
+# 1) Prepare analysis dataset
+# ----------------------------
+analysis_boot <- prolific_dat %>%
+  mutate(
+    Y = log(RT),
+    X = ifelse(Device_Spec == "CPU", 1, 0),   # CPU = 1, GPU = 0
+    M = as.numeric(CV_scaled),                # use already-scaled CV
+    ID = as.factor(pid)
+  ) %>%
+  filter(!is.na(Y), !is.na(X), !is.na(M), !is.na(ID))
 
-# Model Y: Predict the Outcome (log RT) from both Treatment and Mediator [cite: 64]
-out_fit <- lmer(log(RT) ~ Device_Spec + CV + (1 | pid), data = analysis_data)
+# Make sure X is interpreted as a 0/1 numeric predictor
+analysis_boot$X <- as.numeric(analysis_boot$X)
 
-# Convert to standard lmerMod format for the mediation package [cite: 64]
-med_fit_mod <- as(med_fit, "lmerMod")
-out_fit_mod <- as(out_fit, "lmerMod")
+# Unique participant IDs
+uid <- unique(analysis_boot$ID)
+n_subjects <- length(uid)
 
-# Run the Mediation Simulation (Set sims = 100 for speed, 1000 for final publication) [cite: 64, 65]
-mediation_results <- mediation::mediate(
-  model.m = med_fit_mod, 
-  model.y = out_fit_mod, 
-  treat = "Device_Spec", 
-  mediator = "CV",
-  sims = 100 
+# ----------------------------
+# 2) Helper function: one cluster bootstrap sample
+#    IMPORTANT: duplicated participants get unique bootstrap IDs
+# ----------------------------
+make_boot_sample <- function(dat, ids_sampled) {
+  map_dfr(seq_along(ids_sampled), function(i) {
+    this_id <- ids_sampled[i]
+    dat %>%
+      filter(ID == this_id) %>%
+      mutate(
+        boot_pid = factor(paste0("boot_", i))  # unique grouping factor per resampled cluster
+      )
+  })
+}
+
+# ----------------------------
+# 3) Storage for bootstrap estimates
+# ----------------------------
+nboots <- 100
+
+tEffect  <- rep(NA_real_, nboots)  # total effect: X -> Y
+XtoM     <- rep(NA_real_, nboots)  # path a: X -> M
+MtoY     <- rep(NA_real_, nboots)  # path b: M -> Y
+direct   <- rep(NA_real_, nboots)  # direct effect c'
+indirect <- rep(NA_real_, nboots)  # a*b
+
+# ----------------------------
+# 4) Bootstrap loop
+# ----------------------------
+cat("Starting cluster bootstrap...\n")
+
+b <- 1
+while (b <= nboots) {
+  sample_ids <- sample(uid, n_subjects, replace = TRUE)
+  subdata <- make_boot_sample(analysis_boot, sample_ids)
+
+  res <- tryCatch({
+    # Total effect model: X -> Y
+    fit_total <- lmer(
+      Y ~ X + (1 | boot_pid),
+      data = subdata,
+      REML = FALSE
+    )
+
+    # Mediator model: X -> M
+    fit_med <- lmer(
+      M ~ X + (1 | boot_pid),
+      data = subdata,
+      REML = FALSE
+    )
+
+    # Outcome model: M + X -> Y
+    # Updated to include random slope for mediator
+    fit_out <- lmer(
+      Y ~ M + X + (1 + M | boot_pid),
+      data = subdata,
+      REML = FALSE
+    )
+
+    a <- fixef(fit_med)[["X"]]
+    b_path <- fixef(fit_out)[["M"]]
+    c_total <- fixef(fit_total)[["X"]]
+    c_prime <- fixef(fit_out)[["X"]]
+    ab <- a * b_path
+
+    c(
+      total = c_total,
+      a = a,
+      b = b_path,
+      direct = c_prime,
+      indirect = ab
+    )
+  }, error = function(e) {
+    NULL
+  })
+
+  if (!is.null(res)) {
+    tEffect[b]  <- res[["total"]]
+    XtoM[b]     <- res[["a"]]
+    MtoY[b]     <- res[["b"]]
+    direct[b]   <- res[["direct"]]
+    indirect[b] <- res[["indirect"]]
+    b <- b + 1
+  }
+
+  if (b %% 100 == 0) {
+    cat("Bootstrap iteration:", b - 1, "\n")
+  }
+}
+
+# ----------------------------
+# 5) Fit models on full data
+# ----------------------------
+fit_total_full <- lmer(
+  Y ~ X + (1 | ID),
+  data = analysis_boot,
+  REML = FALSE
 )
 
-print(summary(mediation_results))
+fit_med_full <- lmer(
+  M ~ X + (1 | ID),
+  data = analysis_boot,
+  REML = FALSE
+)
+
+fit_out_full <- lmer(
+  Y ~ M + X + (1 + M | ID),
+  data = analysis_boot,
+  REML = FALSE
+)
+
+# ----------------------------
+# 6) Build results table
+# ----------------------------
+get_ci <- function(x) {
+  quantile(x, probs = c(0.025, 0.975), na.rm = TRUE)
+}
+
+results_df <- data.frame(
+  Path = c(
+    "Total Effect (X -> Y)",
+    "Path a (Device -> CV)",
+    "Path b (CV -> RT)",
+    "Direct Effect (c')",
+    "Indirect Effect (a*b)"
+  ),
+  Estimate = c(
+    fixef(fit_total_full)[["X"]],
+    fixef(fit_med_full)[["X"]],
+    fixef(fit_out_full)[["M"]],
+    fixef(fit_out_full)[["X"]],
+    fixef(fit_med_full)[["X"]] * fixef(fit_out_full)[["M"]]
+  ),
+  Lower_95CI = c(
+    get_ci(tEffect)[1],
+    get_ci(XtoM)[1],
+    get_ci(MtoY)[1],
+    get_ci(direct)[1],
+    get_ci(indirect)[1]
+  ),
+  Upper_95CI = c(
+    get_ci(tEffect)[2],
+    get_ci(XtoM)[2],
+    get_ci(MtoY)[2],
+    get_ci(direct)[2],
+    get_ci(indirect)[2]
+  )
+)
+
+results_df$Significant <- ifelse(
+  results_df$Lower_95CI * results_df$Upper_95CI > 0,
+  "Yes",
+  "No"
+)
+
+# ----------------------------
+# 7) Print results
+# ----------------------------
+print(results_df)
+kable(results_df, digits = 4, caption = "Cluster Bootstrap Mediation Results")
+
+# ----------------------------
+# 8) Optional: percent mediated
+# ----------------------------
+total_effect <- fixef(fit_total_full)[["X"]]
+indirect_effect <- fixef(fit_med_full)[["X"]] * fixef(fit_out_full)[["M"]]
+percent_mediated <- (indirect_effect / total_effect) * 100
+
+cat("\nPercent mediated:", round(percent_mediated, 2), "%\n")
+
+### test
+# Calculate Path 'a' (Fixed effect from fit_med)
+path_a <- fixef(fit_med_full)[["X"]]
+
+# Extract individual 'b' paths (Fixed effect + Random deviation)
+random_slopes <- ranef(fit_out_full)$ID
+individual_b <- fixef(fit_out_full)[["M"]] + random_slopes$M
+
+# Calculate individual Indirect Effects
+individual_ab <- path_a * individual_b
+
+# Check the distribution
+summary(individual_ab)
+hist(individual_ab, main="Distribution of Indirect Effects (a*b)")
 
 
 # ------------------------------------------------------------------------------
-# 6. CV THRESHOLDING & SALVAGE LMER
+# 9. CV THRESHOLDING & SALVAGE LMER
 # ------------------------------------------------------------------------------
 print("================ THRESHOLD SALVAGE MODEL ================")
 
