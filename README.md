@@ -1,6 +1,3 @@
-Hi, 
-This project is still in progress. Feel free to browse through the repository but be aware that the code is **not** final.
-
 # Capstone Project: Hardware Confounding in Remote Cognitive Assessments
 
 ## Project Overview
