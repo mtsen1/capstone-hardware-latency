@@ -1,5 +1,5 @@
 # ==============================================================================
-# PROLIFIC STUDY: ANALYSIS SCRIPT
+# PROLIFIC STUDY: INFERENTIAL ANALYSIS SCRIPT
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -16,15 +16,16 @@ library(tibble)
 library(purrr)
 library(knitr)
 
+
 # ------------------------------------------------------------------------------
 # 2. LOAD & PREP DATA
 # ------------------------------------------------------------------------------
 # Import the cleaned, log-IQR filtered dataset
-analysis_data <- read.csv("project2/prolific_data/prolific_cleaned_iqr_NEW.csv")
+prolific_dat <- read.csv("project2/prolific_data/prolific_cleaned_iqr_NEW.csv")
 
 # Ensure factors are set and force GPU as the Reference Level (Baseline)
 # This ensures all coefficients calculate the "Penalty" of switching TO CPU[cite: 60, 63].
-analysis_data <- analysis_data %>%
+prolific_dat <- prolific_dat %>%
   mutate(
     Device_Spec = relevel(factor(Device_Spec), ref = "GPU"),
     pid = as.character(pid),
@@ -40,12 +41,12 @@ print("================ T-TESTS ================")
 
 # A. Trial-Level T-Test (Log Scale) [cite: 46]
 print("--- Trial-Level T-Test (log RT) ---")
-t_test_trial <- t.test(log(RT) ~ Device_Spec, data = analysis_data)
+t_test_trial <- t.test(log(RT) ~ Device_Spec, data = prolific_dat)
 print(t_test_trial)
 
 # B. Participant-Level Paired T-Test (Mean RT in ms) [cite: 59]
 # Aggregate data to find average RT for each participant by Device_Spec [cite: 45]
-participant_means <- analysis_data %>%
+participant_means <- prolific_dat %>%
   group_by(pid, Device_Spec) %>%
   summarise(mean_RT = mean(RT, na.rm = TRUE), .groups = "drop") %>%
   pivot_wider(names_from = Device_Spec, values_from = mean_RT) %>%
@@ -343,7 +344,7 @@ hist(individual_ab, main="Distribution of Indirect Effects (a*b)")
 
 
 # ------------------------------------------------------------------------------
-# 9. CV THRESHOLDING & SALVAGE LMER
+# 6. CV THRESHOLDING & SALVAGE LMER
 # ------------------------------------------------------------------------------
 print("================ THRESHOLD SALVAGE MODEL ================")
 
@@ -351,7 +352,7 @@ print("================ THRESHOLD SALVAGE MODEL ================")
 cv_threshold <- 10
 
 # Group the data into GPU (Reference), Valid CPU, and Invalid CPU [cite: 99]
-threshold_data <- analysis_data %>%
+threshold_data <- prolific_dat %>%
   mutate(
     Group = case_when(
       Device_Spec == "GPU" ~ "1. GPU (Reference)",
@@ -384,3 +385,5 @@ print(lmer_emmeans)
 print("--- Post-Hoc Pairwise Comparisons ---")
 post_hoc_results <- pairs(lmer_emmeans, adjust = "tukey")
 print(post_hoc_results)
+
+
